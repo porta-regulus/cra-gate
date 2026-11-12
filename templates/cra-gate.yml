@@ -1,0 +1,55 @@
+# GitLab CI/CD component. Include it with
+#
+#   include:
+#     - component: $CI_SERVER_FQDN/<group>/cra-gate/cra-gate@<version>
+#       inputs:
+#         product-id: <your product id>
+#
+# Set CVD_API_KEY as a masked CI/CD variable of the project.
+spec:
+  inputs:
+    stage:
+      default: test
+    product-id:
+      description: The id of the product in CVD Portal.
+    release:
+      default: $CI_COMMIT_TAG
+      description: The release label.
+    sbom:
+      default: ""
+      description: Path of a CycloneDX or SPDX JSON SBOM to push before the verdict.
+    sarif:
+      default: ""
+      description: Path of one SARIF 2.1.0 file to push before the verdict.
+    mode:
+      default: block
+      options: [block, warn]
+    on-error:
+      default: fail
+      options: [fail, pass]
+    image:
+      default: ghcr.io/porta-regulus/cra-gate:0.1.0
+      description: The cra-gate image. Pin it by digest for a release pipeline.
+---
+cra-gate:
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.image ]]
+    entrypoint: [""]
+  variables:
+    CVD_PRODUCT_ID: $[[ inputs.product-id ]]
+    CRA_GATE_RELEASE: $[[ inputs.release ]]
+    CRA_GATE_SBOM: $[[ inputs.sbom ]]
+    CRA_GATE_SARIF: $[[ inputs.sarif ]]
+  script:
+    - |
+      set -eu
+      set -- run --mode "$[[ inputs.mode ]]" --on-error "$[[ inputs.on-error ]]" --json cra-gate-verdict.json
+      [ -n "${CRA_GATE_RELEASE:-}" ] && set -- "$@" --release "$CRA_GATE_RELEASE"
+      [ -n "${CRA_GATE_SBOM:-}" ] && set -- "$@" --sbom "$CRA_GATE_SBOM"
+      [ -n "${CRA_GATE_SARIF:-}" ] && set -- "$@" --sarif "$CRA_GATE_SARIF"
+      node /opt/cra-gate/cra-gate.mjs "$@"
+  artifacts:
+    when: always
+    paths:
+      - cra-gate-verdict.json

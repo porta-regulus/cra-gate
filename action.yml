@@ -1,0 +1,46 @@
+name: CRA release gate
+description: Push the SBOM and scan findings of a release to CVD Portal, get a release gate verdict, and fail the job on a block.
+author: Porta Regulus B.V.
+branding:
+  icon: check-circle
+  color: blue
+inputs:
+  api-key:
+    description: The CVD Portal API key. Pass it from a secret. It needs the gate:write scope, plus sbom:write or sarif:write for a push.
+    required: true
+  product-id:
+    description: The id of the product in CVD Portal.
+    required: true
+  release:
+    description: The release label, for example 2.4.1.
+    required: false
+  released-at:
+    description: The release date, YYYY-MM-DD. Used with sbom.
+    required: false
+  part:
+    description: The SBOM part name, for example firmware. Used with sbom.
+    required: false
+  sbom:
+    description: Path of a CycloneDX or SPDX JSON SBOM to push before the verdict.
+    required: false
+  sarif:
+    description: Paths of SARIF 2.1.0 files to push before the verdict, one per line.
+    required: false
+  mode:
+    description: block fails the job on a blocked release. warn never fails the job.
+    required: false
+    default: block
+  on-error:
+    description: fail or pass. What to do when the portal does not answer.
+    required: false
+    default: fail
+  json:
+    description: Path to write the raw verdict to.
+    required: false
+  api-url:
+    description: The base URL of the API.
+    required: false
+    default: https://cvdportal.com
+runs:
+  using: node20
+  main: cra-gate.mjs
