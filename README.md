@@ -27,7 +27,7 @@ The tool is not a scanner. Run your own scanner and SBOM generator, and give the
 - The Enterprise plan to push an SBOM or SARIF file from the pipeline. On Compliance, upload the SBOM in the dashboard.
 - An API key from Settings, then API Keys, with the scope `gate:write`. Add `sbom:write` and `sarif:write` if the pipeline pushes files. An administrator must create a key that pushes an SBOM.
 - The product id, from the product page.
-- Node 20 or later, or Docker.
+- Node 20 or later.
 
 ## GitHub Actions
 
@@ -45,29 +45,16 @@ The tool is not a scanner. Run your own scanner and SBOM generator, and give the
 
 Pin the action by commit SHA. The step writes the checks to the job summary.
 
-## GitLab CI/CD
-
-```yaml
-include:
-  - component: $CI_SERVER_FQDN/<group>/cra-gate/cra-gate@<version>
-    inputs:
-      product-id: <your product id>
-      sbom: sbom.cdx.json
-```
-
-Set `CVD_API_KEY` as a masked CI/CD variable. The job keeps `cra-gate-verdict.json` as an artifact.
-
 ## Any other runner
 
-```bash
-docker run --rm -e CVD_API_KEY -e CVD_PRODUCT_ID -v "$PWD:/work" -w /work ghcr.io/porta-regulus/cra-gate:0.1.0 run --sbom sbom.cdx.json --release 2.4.1
-```
-
-Or with Node and the one file.
+The CLI is one file with no dependencies. Download it at a fixed commit and run it with Node 20 or later.
 
 ```bash
+curl -fsSLO https://raw.githubusercontent.com/porta-regulus/cra-gate/<commit sha>/cra-gate.mjs
 node cra-gate.mjs run --sbom sbom.cdx.json --release 2.4.1
 ```
+
+This works in Jenkins, Azure DevOps, GitLab CI and any runner with Node. A Docker image and a GitLab CI/CD component are not released yet. The `Dockerfile` and `templates/` in this repository are for those future releases.
 
 ## Commands
 
