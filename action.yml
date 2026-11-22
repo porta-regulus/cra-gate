@@ -6,7 +6,7 @@ branding:
   color: blue
 inputs:
   api-key:
-    description: The CVD Portal API key. Pass it from a secret. It needs the gate:write scope, plus sbom:write or sarif:write for a push.
+    description: The CVD Portal API key. Pass it from a secret. It needs the gate:write scope, plus sbom:write or sarif:write (SARIF and JUnit) for a push.
     required: true
   product-id:
     description: The id of the product in CVD Portal.
@@ -25,6 +25,12 @@ inputs:
     required: false
   sarif:
     description: Paths of SARIF 2.1.0 files to push before the verdict, one per line.
+    required: false
+  junit:
+    description: Paths of JUnit XML test reports to push before the verdict, one per line. Needs sarif:write.
+    required: false
+  files:
+    description: Paths of the shipped files of the release, one per line. Their SHA-256 and the commit are recorded on the release with the SBOM push, so this needs sbom and release.
     required: false
   mode:
     description: block fails the job on a blocked release. warn never fails the job.

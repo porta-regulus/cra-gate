@@ -8,11 +8,12 @@
 // Exit codes: 0 pass (or a block in warn mode), 1 block, 2 bad input or a
 // refused credential, 3 the portal did not answer.
 
+import { createHash } from "node:crypto"
 import { readFile, writeFile, appendFile } from "node:fs/promises"
 import { basename } from "node:path"
 import { pathToFileURL } from "node:url"
 
-export const VERSION = "0.1.0"
+export const VERSION = "0.2.0"
 export const DEFAULT_API_URL = "https://cvdportal.com"
 
 export const EXIT = { PASS: 0, BLOCK: 1, USAGE: 2, UNREACHABLE: 3 }
@@ -28,6 +29,7 @@ Usage
   cra-gate verdict [options]        ask for a verdict and store it
   cra-gate push-sbom <file> [options]
   cra-gate push-sarif <file> [options]
+  cra-gate push-junit <file> [options]
 
 Options
   --product <id>        product id (or CVD_PRODUCT_ID)
@@ -36,6 +38,9 @@ Options
   --part <name>         SBOM part name, for example firmware (SBOM push only)
   --sbom <file>         with run: a CycloneDX or SPDX JSON SBOM to push first
   --sarif <file>        with run: a SARIF 2.1.0 file to push first. Repeat for more files
+  --junit <file>        with run: a JUnit XML test report to push first. Repeat for more files
+  --file <path>         a shipped file of the release. Its SHA-256 and the commit go with the
+                        SBOM push, so it needs --sbom and --release. Repeat for more files
   --mode <block|warn>   warn never fails the job. Default block
   --on-error <fail|pass> what to do when the portal does not answer. Default fail
   --json <path>         write the raw verdict to a file
@@ -52,9 +57,9 @@ export class UsageError extends Error {}
 export class UnreachableError extends Error {}
 
 const VALUE_FLAGS = new Set([
-  "product", "release", "released-at", "part", "sbom", "sarif", "mode", "on-error", "json", "api-url",
+  "product", "release", "released-at", "part", "sbom", "sarif", "junit", "file", "mode", "on-error", "json", "api-url",
 ])
-const REPEATABLE = new Set(["sarif"])
+const REPEATABLE = new Set(["sarif", "junit", "file"])
 
 /** Splits argv into a command, positionals and options. Throws UsageError on an unknown flag. */
 export function parseArgs(argv) {
@@ -140,8 +145,14 @@ export function resolveConfig(options, env) {
   const onError = pick("on-error", "on-error") ?? "fail"
   if (onError !== "fail" && onError !== "pass") throw new UsageError("--on-error must be fail or pass.")
 
-  const sarifInput = actionInput(env, "sarif")
-  const sarif = options.sarif ?? (sarifInput ? sarifInput.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [])
+  // A multi-line Action input holds one path per line.
+  const lines = (name) => {
+    const value = actionInput(env, name)
+    return value ? value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : []
+  }
+  const sarif = options.sarif ?? lines("sarif")
+  const junit = options.junit ?? lines("junit")
+  const files = options.file ?? lines("files")
 
   return {
     apiKey,
@@ -152,6 +163,8 @@ export function resolveConfig(options, env) {
     part: pick("part", "part"),
     sbom: pick("sbom", "sbom"),
     sarif,
+    junit,
+    files,
     mode,
     onError,
     json: pick("json", "json"),
@@ -206,8 +219,38 @@ async function readText(path, what) {
   }
 }
 
+/** The name and SHA-256 of each shipped file, read from disk. */
+export async function hashFiles(paths) {
+  const out = []
+  for (const path of paths) {
+    let bytes
+    try {
+      bytes = await readFile(path)
+    } catch {
+      throw new UsageError(`Cannot read the shipped file: ${path}`)
+    }
+    out.push({ name: basename(path), sha256: createHash("sha256").update(bytes).digest("hex") })
+  }
+  return out
+}
+
+/** The commit of the CI run, when it is a git commit id. */
+function ciCommit(config) {
+  const sha = config.ci.commitSha
+  return sha && /^[0-9a-f]{7,64}$/i.test(sha) ? sha.toLowerCase() : undefined
+}
+
 export async function pushSbom(config, file, deps = {}) {
   const content = await readText(file, "SBOM")
+  // The shipped files and the commit are recorded on the release, write-once.
+  // Sent only with --file, so a pipeline that reruns a release label from
+  // another commit is not refused because of the commit alone.
+  let provenance = {}
+  if (config.files?.length) {
+    if (!config.release) throw new UsageError("--file needs --release: the hashes are recorded on the release.")
+    const commit = ciCommit(config)
+    provenance = { files: await hashFiles(config.files), ...(commit ? { commit } : {}) }
+  }
   const res = await request(config, "POST", "/api/v1/sbom", {
     body: {
       filename: basename(file),
@@ -216,6 +259,7 @@ export async function pushSbom(config, file, deps = {}) {
       ...(config.part ? { part: config.part } : {}),
       ...(config.release ? { releaseVersion: config.release } : {}),
       ...(config.releasedAt ? { releasedAt: config.releasedAt } : {}),
+      ...provenance,
     },
     // The push scans the components before it returns.
     timeoutMs: 180_000,
@@ -236,12 +280,39 @@ export async function pushSarif(config, file, deps = {}) {
   const source = config.ci.source === "github-actions" || config.ci.source === "gitlab-ci" ? config.ci.source : "manual"
   const res = await request(config, "POST", "/api/v1/scan/sarif", {
     body: content,
-    query: { source, repo: config.ci.repo, productId: config.productId },
+    query: { source, repo: config.ci.repo, productId: config.productId, releaseVersion: config.release },
     timeoutMs: 120_000,
     ...deps,
   })
   if (res.status !== 200) throw refusal("The SARIF push", res)
   return res.body
+}
+
+/** Pushes one JUnit XML report. The release links it to that release. */
+export async function pushJunit(config, file, deps = {}) {
+  const content = await readText(file, "JUnit")
+  const source = config.ci.source === "github-actions" || config.ci.source === "gitlab-ci" ? config.ci.source : "manual"
+  const res = await request(config, "POST", "/api/v1/scan/junit", {
+    body: {
+      filename: basename(file),
+      content,
+      productId: config.productId,
+      source,
+      ...(config.ci.repo ? { repo: config.ci.repo } : {}),
+      ...(config.release ? { releaseVersion: config.release } : {}),
+      ...(config.releasedAt ? { releasedAt: config.releasedAt } : {}),
+    },
+    timeoutMs: 120_000,
+    ...deps,
+  })
+  if (res.status !== 200) throw refusal("The JUnit push", res)
+  return res.body
+}
+
+/** One log line for a JUnit push. */
+export function junitLine(file, r) {
+  const errors = r?.errored ? `, ${r.errored} errors` : ""
+  return `JUnit pushed (${basename(file)}): ${r?.total ?? "?"} tests, ${r?.passed ?? "?"} passed, ${r?.failed ?? "?"} failed${errors}.`
 }
 
 /** Asks for a verdict and stores it. Returns the verdict body for 201 and 422. */
@@ -323,6 +394,8 @@ export function publicVerdict(verdict) {
 
 /** One log line for an SBOM push. It says so when the vulnerability check did not run. */
 export function sbomLine(r) {
+  // A release SBOM is write-once. A retry with the same components changes nothing.
+  if (r?.release?.unchanged) return `SBOM of release ${r.release.version} already stored with the same ${r?.count ?? "?"} components. Nothing changed.`
   const base = `SBOM pushed: ${r?.count ?? "?"} components.`
   if (r?.refreshError) return `${base} The vulnerability check failed: ${r.refreshError}`
   if (r && r.refresh === null) return `${base} The vulnerability check did not run for this push.`
@@ -354,11 +427,18 @@ export async function main(argv, io = { env: process.env, out: console.log, err:
 
     config = resolveConfig(args.options, io.env)
 
-    if (command === "push-sbom" || command === "push-sarif") {
+    // The hashes ride on the SBOM push, so --file without an SBOM would be lost.
+    if (config.files.length && !(command === "push-sbom" || (command === "run" && config.sbom))) {
+      throw new UsageError("--file is sent with the SBOM push. Give --sbom with run, or use push-sbom.")
+    }
+
+    if (command === "push-sbom" || command === "push-sarif" || command === "push-junit") {
       const file = args.positionals[0]
       if (!file) throw new UsageError(`Give the file: cra-gate ${command} <file>`)
       if (command === "push-sbom") {
         io.out(sbomLine(await pushSbom(config, file, deps)))
+      } else if (command === "push-junit") {
+        io.out(junitLine(file, await pushJunit(config, file, deps)))
       } else {
         const r = await pushSarif(config, file, deps)
         io.out(`SARIF pushed: ${r?.ingested ?? 0} findings, ${r?.created ?? 0} new.`)
@@ -375,6 +455,9 @@ export async function main(argv, io = { env: process.env, out: console.log, err:
       for (const file of config.sarif) {
         const r = await pushSarif(config, file, deps)
         io.out(`SARIF pushed (${basename(file)}): ${r?.ingested ?? 0} findings, ${r?.created ?? 0} new.`)
+      }
+      for (const file of config.junit) {
+        io.out(junitLine(file, await pushJunit(config, file, deps)))
       }
       return await runVerdict(config, io, deps)
     }

@@ -24,8 +24,8 @@ The tool is not a scanner. Run your own scanner and SBOM generator, and give the
 ## What you need
 
 - A CVD Portal workspace on the Compliance plan or higher, for the verdict.
-- The Enterprise plan to push an SBOM or SARIF file from the pipeline. On Compliance, upload the SBOM in the dashboard.
-- An API key from Settings, then API Keys, with the scope `gate:write`. Add `sbom:write` and `sarif:write` if the pipeline pushes files. An administrator must create a key that pushes an SBOM.
+- The Enterprise plan to push an SBOM, SARIF or JUnit file from the pipeline. On Compliance, upload the SBOM in the dashboard.
+- An API key from Settings, then API Keys, with the scope `gate:write`. Add `sbom:write` and `sarif:write` ("Push pipeline results", for SARIF and JUnit) if the pipeline pushes files. An administrator must create a key that pushes an SBOM.
 - The product id, from the product page.
 - Node 20 or later.
 
@@ -41,7 +41,13 @@ The tool is not a scanner. Run your own scanner and SBOM generator, and give the
     sarif: |
       results/semgrep.sarif
       results/trivy.sarif
+    junit: |
+      reports/junit.xml
+    files: |
+      dist/firmware.bin
 ```
+
+`files` records the SHA-256 of each shipped file and the commit of the run on the release, with the SBOM push. Both are write-once: a later run with another hash for the same file name, or from another commit, is refused. So give `files` only for a real release label, for example a tag.
 
 Pin the action by commit SHA. The step writes the checks to the job summary.
 
@@ -60,10 +66,11 @@ This works in Jenkins, Azure DevOps, GitLab CI and any runner with Node. A Docke
 
 | Command | What it does |
 |---|---|
-| `run` | Pushes the files given with `--sbom` and `--sarif`, then asks for a verdict |
+| `run` | Pushes the files given with `--sbom`, `--sarif` and `--junit`, then asks for a verdict |
 | `verdict` | Asks for a verdict and stores it |
 | `push-sbom <file>` | Pushes a CycloneDX or SPDX JSON SBOM |
 | `push-sarif <file>` | Pushes a SARIF 2.1.0 file |
+| `push-junit <file>` | Pushes a JUnit XML test report |
 
 | Option | Meaning |
 |---|---|
@@ -71,6 +78,8 @@ This works in Jenkins, Azure DevOps, GitLab CI and any runner with Node. A Docke
 | `--release <version>` | The release label |
 | `--released-at <date>` | The release date, `YYYY-MM-DD`, for an SBOM push |
 | `--part <name>` | The SBOM part, for example `firmware`, for an SBOM push |
+| `--junit <file>` | With `run`, a JUnit XML report to push. Repeat for more files |
+| `--file <path>` | A shipped file. Its SHA-256 and the commit go with the SBOM push, so it needs `--sbom` and `--release`. Repeat for more files |
 | `--mode <block\|warn>` | `warn` never fails the job. The default is `block` |
 | `--on-error <fail\|pass>` | What to do when the service does not answer. The default is `fail` |
 | `--json <path>` | Writes the verdict to a file |
@@ -92,7 +101,8 @@ With `--on-error pass`, code 3 becomes 0, and the log says that no verdict exist
 ## What it sends
 
 - To the API URL only, over https. It follows no redirect.
-- The SBOM and SARIF files that you name.
+- The SBOM, SARIF and JUnit files that you name.
+- For each `--file`, the file name and its SHA-256, never the file itself.
 - The product id, the release label, the commit SHA, the URL of the pipeline run, and the name of the CI system.
 
 It prints no approver name or email. The file from `--json` leaves the approval block out.

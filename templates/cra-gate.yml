@@ -21,6 +21,12 @@ spec:
     sarif:
       default: ""
       description: Path of one SARIF 2.1.0 file to push before the verdict.
+    junit:
+      default: ""
+      description: Paths of JUnit XML test reports to push before the verdict, separated by spaces.
+    files:
+      default: ""
+      description: Paths of the shipped files of the release, separated by spaces. Needs sbom and release.
     mode:
       default: block
       options: [block, warn]
@@ -28,7 +34,7 @@ spec:
       default: fail
       options: [fail, pass]
     image:
-      default: ghcr.io/porta-regulus/cra-gate:0.1.0
+      default: ghcr.io/porta-regulus/cra-gate:0.2.0
       description: The cra-gate image. Pin it by digest for a release pipeline.
 ---
 cra-gate:
@@ -41,6 +47,8 @@ cra-gate:
     CRA_GATE_RELEASE: $[[ inputs.release ]]
     CRA_GATE_SBOM: $[[ inputs.sbom ]]
     CRA_GATE_SARIF: $[[ inputs.sarif ]]
+    CRA_GATE_JUNIT: $[[ inputs.junit ]]
+    CRA_GATE_FILES: $[[ inputs.files ]]
   script:
     - |
       set -eu
@@ -48,6 +56,8 @@ cra-gate:
       [ -n "${CRA_GATE_RELEASE:-}" ] && set -- "$@" --release "$CRA_GATE_RELEASE"
       [ -n "${CRA_GATE_SBOM:-}" ] && set -- "$@" --sbom "$CRA_GATE_SBOM"
       [ -n "${CRA_GATE_SARIF:-}" ] && set -- "$@" --sarif "$CRA_GATE_SARIF"
+      for f in ${CRA_GATE_JUNIT:-}; do set -- "$@" --junit "$f"; done
+      for f in ${CRA_GATE_FILES:-}; do set -- "$@" --file "$f"; done
       node /opt/cra-gate/cra-gate.mjs "$@"
   artifacts:
     when: always

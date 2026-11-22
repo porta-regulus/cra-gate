@@ -2,6 +2,7 @@
 import { test, describe, before, after, beforeEach } from "node:test"
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
+import { createHash } from "node:crypto"
 import { mkdtemp, writeFile, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -172,6 +173,10 @@ describe("render", () => {
     assert.equal(sbomLine({ count: 12, refresh: { ok: true } }), "SBOM pushed: 12 components.")
     assert.match(sbomLine({ count: 12, refresh: null }), /did not run/)
     assert.match(sbomLine({ count: 12, refreshError: "OSV down" }), /failed: OSV down/)
+    assert.equal(
+      sbomLine({ count: 12, refresh: null, release: { version: "1.0", unchanged: true } }),
+      "SBOM of release 1.0 already stored with the same 12 components. Nothing changed.",
+    )
   })
 })
 
@@ -295,5 +300,81 @@ describe("main against a stub portal", () => {
   test("--help exits 0 and no arguments exit 2", async () => {
     assert.equal(await main(["--help"], io()), EXIT.PASS)
     assert.equal(await main([], io()), EXIT.USAGE)
+  })
+})
+
+describe("junit and files (spec B5)", () => {
+  const sha = (text) => createHash("sha256").update(text).digest("hex")
+  let dir
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cra-gate-b5-"))
+    await writeFile(join(dir, "sbom.json"), JSON.stringify({ bomFormat: "CycloneDX", components: [] }))
+    await writeFile(join(dir, "junit.xml"), "<testsuite><testcase name='a'/></testsuite>")
+    await writeFile(join(dir, "fw.bin"), "firmware bytes")
+  })
+
+  test("run pushes the SBOM with the file hashes and the commit, then JUnit, then asks for a verdict", async () => {
+    reply = (req) => {
+      if (req.url.startsWith("/api/v1/sbom")) return { status: 200, body: { count: 0, refresh: null } }
+      if (req.url.startsWith("/api/v1/scan/junit")) return { status: 200, body: { total: 1, passed: 1, failed: 0, errored: 0 } }
+      return { status: 201, body: PASS }
+    }
+    const i = io({ GITHUB_ACTIONS: "true", GITHUB_SHA: "ABCDEF1234", GITHUB_REPOSITORY: "acme/app" })
+    const code = await main(["run", "--release", "2.5.0", "--sbom", join(dir, "sbom.json"), "--file", join(dir, "fw.bin"), "--junit", join(dir, "junit.xml")], i)
+    assert.equal(code, EXIT.PASS)
+    assert.deepEqual(requests.map((r) => r.url.split("?")[0]), ["/api/v1/sbom", "/api/v1/scan/junit", "/api/v1/compliance/release-gate/runs"])
+    const sbom = JSON.parse(requests[0].body)
+    assert.deepEqual(sbom.files, [{ name: "fw.bin", sha256: sha("firmware bytes") }])
+    assert.equal(sbom.commit, "abcdef1234")
+    assert.equal(sbom.releaseVersion, "2.5.0")
+    const junit = JSON.parse(requests[1].body)
+    assert.equal(junit.filename, "junit.xml")
+    assert.equal(junit.releaseVersion, "2.5.0")
+    assert.equal(junit.source, "github-actions")
+    assert.equal(junit.repo, "acme/app")
+    assert.match(i.text(), /JUnit pushed \(junit.xml\): 1 tests, 1 passed, 0 failed\./)
+  })
+
+  test("the SBOM push carries no commit without --file", async () => {
+    reply = () => ({ status: 200, body: { count: 0 } })
+    const i = io({ GITHUB_ACTIONS: "true", GITHUB_SHA: "ABCDEF1234" })
+    assert.equal(await main(["push-sbom", join(dir, "sbom.json"), "--release", "2.5.0"], i), EXIT.PASS)
+    const body = JSON.parse(requests[0].body)
+    assert.equal(body.commit, undefined)
+    assert.equal(body.files, undefined)
+  })
+
+  test("--file needs the SBOM push and a release, and a readable file", async () => {
+    const noSbom = io()
+    assert.equal(await main(["run", "--file", join(dir, "fw.bin")], noSbom), EXIT.USAGE)
+    assert.match(noSbom.errors(), /sent with the SBOM push/)
+    const noRelease = io()
+    assert.equal(await main(["push-sbom", join(dir, "sbom.json"), "--file", join(dir, "fw.bin")], noRelease), EXIT.USAGE)
+    assert.match(noRelease.errors(), /needs --release/)
+    const missing = io()
+    assert.equal(await main(["push-sbom", join(dir, "sbom.json"), "--release", "1", "--file", join(dir, "nope.bin")], missing), EXIT.USAGE)
+    assert.match(missing.errors(), /Cannot read the shipped file/)
+    assert.equal(requests.length, 0)
+  })
+
+  test("push-junit reports a refusal with the reason", async () => {
+    reply = () => ({ status: 400, body: { error: "The JUnit report is not valid XML: x" } })
+    const i = io()
+    assert.equal(await main(["push-junit", join(dir, "junit.xml")], i), EXIT.USAGE)
+    assert.match(i.errors(), /The JUnit push was refused \(400\): The JUnit report is not valid XML/)
+  })
+
+  test("the Action reads junit and files as one path per line", () => {
+    const c = resolveConfig({}, { "INPUT_API-KEY": KEY, "INPUT_PRODUCT-ID": "p", INPUT_JUNIT: "a.xml\n b.xml \n", INPUT_FILES: "fw.bin" })
+    assert.deepEqual(c.junit, ["a.xml", "b.xml"])
+    assert.deepEqual(c.files, ["fw.bin"])
+  })
+})
+
+describe("GitLab template", () => {
+  test("its default image is the CLI version, so the inputs it passes are known", async () => {
+    const template = await readFile(new URL("../templates/cra-gate.yml", import.meta.url), "utf8")
+    const { VERSION } = await import("../cra-gate.mjs")
+    assert.match(template, new RegExp(`default: ghcr\\.io/porta-regulus/cra-gate:${VERSION.replace(/\./g, "\\.")}\\n`))
   })
 })
